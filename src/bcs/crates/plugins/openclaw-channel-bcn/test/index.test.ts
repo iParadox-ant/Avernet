@@ -14,6 +14,7 @@ import {
   handleBcsRouteTool,
   initAgentEventsSubscription,
   rememberTaskToolSession,
+  resolveInboundSender,
   resolveGroupIdFromSessionKey,
 } from '../src/inbound-handler.js';
 import type { RequestFrame, ResolvedBcsAccount } from '../src/types.js';
@@ -36,6 +37,64 @@ function listSourceFiles(dir: string): string[] {
 }
 
 describe('openclaw-channel-bcn', () => {
+  it('uses BCS actor identity for OpenClaw sender metadata', () => {
+    assert.deepEqual(
+      resolveInboundSender(
+        '[from:Apple]ALL Hi',
+        {
+          source: 'api',
+          user_id: 'Apple',
+          actor_id: 'human_001',
+          actor_name: 'Apple',
+        },
+        {
+          session_id: 'session-1',
+          participants: [],
+          originator: '产品经理',
+          from: 'Apple(human_001)',
+          you_are_mentioned: true,
+          is_sender: false,
+          mentions: [],
+          message: 'ALL Hi',
+        },
+      ),
+      {
+        displayName: 'Apple',
+        actorId: 'human_001',
+        strippedText: 'ALL Hi',
+      },
+    );
+
+    assert.deepEqual(
+      resolveInboundSender(
+        '[from:研发]bot reply',
+        {
+          source: 'api',
+          user_id: '研发',
+          actor_id: 'bot_11b77a19',
+          actor_name: '研发',
+        },
+        {
+          session_id: 'session-1',
+          participants: [],
+          originator: '产品经理',
+          from: '研发(bot_11b77a19)',
+          from_bot_id: 'bot_11b77a19',
+          from_bot_owner: '001',
+          you_are_mentioned: true,
+          is_sender: false,
+          mentions: [],
+          message: 'bot reply',
+        },
+      ),
+      {
+        displayName: '研发',
+        actorId: 'bot_11b77a19',
+        strippedText: 'bot reply',
+      },
+    );
+  });
+
   it('resolves default and named BCS accounts', () => {
     const cfg = {
       channels: {
