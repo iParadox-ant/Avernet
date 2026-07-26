@@ -1146,6 +1146,10 @@ impl BcsConfig {
 }
 
 fn validate_loaded_config(config: &BcsConfig) -> Result<(), Box<dyn std::error::Error>> {
+    config.bcsfuse.validate().map_err(|e| {
+        Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, e))
+            as Box<dyn std::error::Error>
+    })?;
     config.telemetry.validate().map_err(|e| {
         Box::new(std::io::Error::new(std::io::ErrorKind::InvalidInput, e))
             as Box<dyn std::error::Error>
@@ -1198,6 +1202,19 @@ mod tests {
         assert_eq!(config.async_chat_run_timeout_ms, 7_500_000);
         assert!(config.security.outbound_url.block_private_networks);
         assert!(!config.security.outbound_url.allow_loopback);
+    }
+
+    #[test]
+    fn test_loaded_config_rejects_invalid_bcsfuse_retry_settings() {
+        let mut config = BcsConfig::default();
+        config.bcsfuse.sync_max_attempts = 0;
+
+        let error = validate_loaded_config(&config).expect_err("invalid retry config must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("bcsfuse.sync_max_attempts must be at least 1")
+        );
     }
 
     #[test]

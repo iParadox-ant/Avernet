@@ -5,10 +5,12 @@
 - Bot service implementation for BCS.
 - Bot onboarding, discovery, status, connectivity, and binding metadata behavior.
 - Application-facing orchestration around registry reads and writes.
+- Shared per-bot scheduling for best-effort visibility synchronization.
 
 ## Consumes
 
 - `bcs-service-api` contract traits and DTOs.
+- The outbound `VisibilitySyncPort` supplied by bootstrap.
 - `plugin-api/*` contracts when persistence or cache support is needed.
 - Pure utility crates for IDs, logging, and serialization.
 
@@ -32,7 +34,7 @@
 
 ## Runtime ownership
 
-The crate owns registry business rules and status/connectivity semantics. It does not own socket runtime state or transport handling.
+The crate owns registry business rules, status/connectivity semantics, and visibility-sync scheduling. It does not own socket runtime state, transport handling, or BCSFuse retry policy.
 
 ## Tests
 

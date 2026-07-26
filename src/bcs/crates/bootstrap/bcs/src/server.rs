@@ -34,7 +34,9 @@ use crate::plugins::{
     build_registered_llm_provider, build_registered_security_gateway,
     build_registered_user_directory,
 };
-use bcs_bot::{Bot, BotCore, ProviderBotEvents, ProviderCore, ProviderManagement};
+use bcs_bot::{
+    Bot, BotCore, ProviderBotEvents, ProviderCore, ProviderManagement, VisibilitySyncCoordinator,
+};
 use bcs_bot_store::{DbProviderStore, MemoryBotRepo, MemoryProviderStore, PersistentBotRepo};
 use bcs_channel::{BcsChannelService, ChannelServiceInboundSink};
 use bcs_channel_api::{ChannelHttpIngressRegistry, ChannelProvider, ChannelProviderRegistry};
@@ -53,7 +55,9 @@ use bcs_friend_store::{
     DbFriendRequestStore, DbFriendStore, MemoryFriendRepo, MemoryFriendRequestRepo,
 };
 use bcs_fuse_client::FuseClient;
-use bcs_fusion::{FuseClientService, FuseWorkerProfileService, LocalFusionService};
+use bcs_fusion::{
+    FuseClientService, FuseVisibilitySyncPort, FuseWorkerProfileService, LocalFusionService,
+};
 use bcs_group::{GroupConfig, GroupCore, GroupManagement};
 use bcs_group_store::{MemoryGroupRepo, MySqlGroupStore};
 use bcs_http::{
@@ -98,6 +102,7 @@ use bcs_service_api::{
         ChannelBindingRepoPort, ConversationSessionRepoPort, ImParticipantRepoPort,
         MessageRepoPort, SessionRepoPort,
     },
+    port::{NoopVisibilitySyncPort, VisibilitySyncPort},
 };
 use bcs_services_container::{Services, ServicesBuilder};
 use bcs_session::SessionManagementServiceImpl;
@@ -1019,6 +1024,8 @@ impl Default for BcsServerState {
             provider_repos.provider_bindings.clone(),
         ));
         let bot_registry: Arc<dyn BotRegistryCoreService> = bot_core_arc.clone();
+        let visibility_sync =
+            create_visibility_sync_coordinator(&config, bot_registry.clone(), None);
         // F.1/F.2 dual-write wiring: relation store must be created BEFORE
         // friend_store and provider_management so it can be injected into both.
         let relation_store: Arc<RelationCore> = Arc::new(RelationCore::memory());
@@ -1058,7 +1065,8 @@ impl Default for BcsServerState {
             )
             .with_connection_control(
                 bot_connections.clone() as Arc<dyn bcs_service_api::BotConnectionControlPort>
-            );
+            )
+            .with_visibility_sync(visibility_sync);
         if let Some(user_directory) = user_directory.clone() {
             bot_use_cases = bot_use_cases.with_user_directory(user_directory);
         }
@@ -1418,6 +1426,26 @@ fn create_fusion_service(
     }
 }
 
+fn create_visibility_sync_coordinator(
+    config: &BcsConfig,
+    registry: Arc<dyn BotRegistryCoreService>,
+    fuse_client: Option<&Arc<FuseClient>>,
+) -> VisibilitySyncCoordinator {
+    config
+        .bcsfuse
+        .validate()
+        .expect("bcsfuse retry configuration must be valid");
+    let port: Arc<dyn VisibilitySyncPort> = match fuse_client {
+        Some(client) => Arc::new(FuseVisibilitySyncPort::new(
+            client.clone(),
+            config.bcsfuse.clone(),
+            config.bots_base_dir.clone(),
+        )),
+        None => Arc::new(NoopVisibilitySyncPort),
+    };
+    VisibilitySyncCoordinator::new(registry, port)
+}
+
 fn create_standalone_leader_lifecycle() -> (
     Arc<dyn LeaderElectionPort>,
     Arc<Mutex<LifecycleOrchestrator>>,
@@ -1570,6 +1598,7 @@ fn build_use_case_bundle(
     friend: Arc<dyn bcs_service_api::FriendCoreService>,
     friend_request: Arc<dyn bcs_service_api::FriendRequestCoreService>,
     relation: Arc<dyn bcs_service_api::RelationCoreService>,
+    visibility_sync: VisibilitySyncCoordinator,
     fuse_client: Option<Arc<FuseClient>>,
     fusion: Arc<dyn bcs_service_api::FusionCoreService>,
     bot_delivery: Arc<dyn BotDeliveryPort>,
@@ -1595,7 +1624,8 @@ fn build_use_case_bundle(
         .with_bot_core(bot_core.clone())
         .with_organization(organization_core.clone())
         .with_relation(relation.clone())
-        .with_connection_control(bot_connection_control.clone());
+        .with_connection_control(bot_connection_control.clone())
+        .with_visibility_sync(visibility_sync.clone());
     if let Some(user_directory) = user_directory {
         bot_use_cases = bot_use_cases.with_user_directory(user_directory);
     }
@@ -1679,7 +1709,8 @@ fn build_use_case_bundle(
             relation,
             config.onboard_binding_enabled,
             config.default_visibility.clone(),
-        )),
+        )
+        .with_visibility_sync(visibility_sync)),
         bot_query: bot_use_cases.clone(),
         bot_management: bot_use_cases.clone(),
         bot_runtime: bot_use_cases.clone(),
@@ -2227,6 +2258,8 @@ impl BcsServer {
         ));
 
         let (fusion, fuse_client) = create_fusion_service(&config);
+        let visibility_sync =
+            create_visibility_sync_coordinator(&config, bot_registry.clone(), fuse_client.as_ref());
         let bot_connections = Arc::new(BotConnectionRegistry::new());
         let mut bot_use_cases = Bot::new_with_friend(bot_registry.clone(), friend_store.clone())
             .with_bot_core(bot_core_arc.clone())
@@ -2236,7 +2269,8 @@ impl BcsServer {
             )
             .with_connection_control(
                 bot_connections.clone() as Arc<dyn bcs_service_api::BotConnectionControlPort>
-            );
+            )
+            .with_visibility_sync(visibility_sync.clone());
         if let Some(user_directory) = user_directory.clone() {
             bot_use_cases = bot_use_cases.with_user_directory(user_directory);
         }
@@ -2330,6 +2364,7 @@ impl BcsServer {
             friend_store.clone(),
             friend_request_store.clone(),
             relation_store.clone(),
+            visibility_sync.clone(),
             fuse_client.clone(),
             fusion.clone(),
             bot_delivery.clone(),
@@ -2532,6 +2567,10 @@ impl BcsServer {
     ///
     /// Public builds use local storage and standalone leader election.
     pub async fn new_with_storage(config: BcsConfig) -> crate::Result<Self> {
+        config
+            .bcsfuse
+            .validate()
+            .map_err(crate::BcsError::InvalidConfig)?;
         let infrastructure_plugins = InfrastructurePlugins::from_config(&config).await?;
         Self::new_with_infrastructure(
             config,
@@ -2547,6 +2586,10 @@ impl BcsServer {
         infrastructure_plugins: InfrastructurePlugins,
         extensions: BcsServerExtensions,
     ) -> crate::Result<Self> {
+        config
+            .bcsfuse
+            .validate()
+            .map_err(crate::BcsError::InvalidConfig)?;
         use bcs_service_api::BotRegistryCoreService;
 
         let outbound_url_guard = outbound_url_guard_from_config(&config);
@@ -2649,6 +2692,8 @@ impl BcsServer {
         let proposals = Arc::new(ProposalStore::new());
 
         let (fusion, fuse_client) = create_fusion_service(&config);
+        let visibility_sync =
+            create_visibility_sync_coordinator(&config, bot_registry.clone(), fuse_client.as_ref());
         register_late_lifecycles(&lifecycle, fuse_client.as_ref());
 
         // F.1/F.2 dual-write wiring: relation_svc MUST be constructed BEFORE
@@ -2859,6 +2904,7 @@ impl BcsServer {
             friend_svc.clone(),
             friend_request_svc.clone(),
             relation_svc.clone(),
+            visibility_sync.clone(),
             fuse_client.clone(),
             fusion.clone(),
             bot_delivery.clone(),
@@ -3925,6 +3971,28 @@ mod tests {
         config.collaboration.templates.storage_type = CollaborationTemplateStorageKind::Mysql;
 
         let _service = build_standalone_collaboration_template_service(&config);
+    }
+
+    #[test]
+    #[should_panic(expected = "bcsfuse retry configuration must be valid")]
+    fn in_memory_server_rejects_invalid_bcsfuse_retry_config() {
+        let mut config = BcsConfig::default();
+        config.bcsfuse.sync_max_attempts = 0;
+
+        let _server = BcsServer::new(config);
+    }
+
+    #[tokio::test]
+    async fn storage_server_rejects_invalid_bcsfuse_retry_config_before_plugin_setup() {
+        let mut config = BcsConfig::default();
+        config.bcsfuse.sync_max_attempts = 0;
+
+        let result = BcsServer::new_with_storage(config).await;
+        assert!(matches!(
+            result,
+            Err(crate::BcsError::InvalidConfig(message))
+                if message.contains("bcsfuse.sync_max_attempts")
+        ));
     }
 
     #[test]
