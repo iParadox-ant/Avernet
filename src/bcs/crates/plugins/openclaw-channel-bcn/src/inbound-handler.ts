@@ -65,16 +65,25 @@ export function resolveInboundSender(
   rawText: string,
   channel?: ChatSendParams['channel'],
   sessionContext?: GroupContext,
-): { displayName: string; actorId: string | undefined; strippedText: string } {
-  const { senderName, text: strippedText } = extractFromPrefix(rawText);
-  const displayName = nonEmptyString(channel?.actor_name)
-    || nonEmptyString(senderName)
+): {
+    fromDisplayName: string;
+    senderName: string;
+    senderId: string | undefined;
+    strippedText: string;
+  } {
+  const { senderName: prefixedSenderName, text: strippedText } = extractFromPrefix(rawText);
+  const fromDisplayName = prefixedSenderName
+    || channel?.user_id
+    || sessionContext?.from
+    || 'bcs-bot';
+  const senderName = nonEmptyString(channel?.actor_name)
+    || nonEmptyString(prefixedSenderName)
     || nonEmptyString(channel?.user_id)
     || nonEmptyString(sessionContext?.from)
     || 'bcs-bot';
-  const actorId = nonEmptyString(channel?.actor_id)
+  const senderId = nonEmptyString(channel?.actor_id)
     || nonEmptyString(sessionContext?.from_bot_id);
-  return { displayName, actorId, strippedText };
+  return { fromDisplayName, senderName, senderId, strippedText };
 }
 
 /** Active streams: run_id -> AbortController */
@@ -892,7 +901,7 @@ export async function handleChatSend(
   const runId = randomUUID();
   client.sendResponse(request.id, true, { run_id: runId });
 
-  const { displayName, actorId, strippedText } = resolveInboundSender(
+  const { fromDisplayName, senderName, senderId, strippedText } = resolveInboundSender(
     text,
     channel,
     sessionContext,
@@ -900,7 +909,7 @@ export async function handleChatSend(
 
   const preview = strippedText.length > 100 ? `${strippedText.slice(0, 100)}...` : strippedText;
   const ctxInfo = sessionContext ? extractGroupContext(sessionContext) : {};
-  log?.info?.(`chat.send from ${displayName} in ${bcsGroupId || 'onboarding'}: ${preview}`, ctxInfo);
+  log?.info?.(`chat.send from ${fromDisplayName} in ${bcsGroupId || 'onboarding'}: ${preview}`, ctxInfo);
 
   // Track active stream for abort support
   const abortController = new AbortController();
@@ -963,15 +972,15 @@ export async function handleChatSend(
       Body: text,
       RawBody: text,
       CommandBody: text,
-      From: `bcs:${displayName}`,
+      From: `bcs:${fromDisplayName}`,
       To: bcsGroupId || `bcs:${account.botId}`,
       SessionKey: route.sessionKey,
       AccountId: account.accountId,
       OriginatingChannel: CHANNEL_ID,
       OriginatingTo: bcsGroupId || `bcs:${account.botId}`,
       ChatType: 'group',
-      SenderName: displayName,
-      SenderId: actorId,
+      SenderName: senderName,
+      SenderId: senderId,
       Provider: CHANNEL_ID,
       Surface: CHANNEL_ID,
       ConversationLabel: bcsGroupId ? `BCS Group ${bcsGroupId}` : 'BCS Onboarding',
@@ -1320,14 +1329,14 @@ export async function handleChatInject(
     return;
   }
 
-  const { displayName, actorId, strippedText } = resolveInboundSender(
+  const { fromDisplayName, senderName, senderId, strippedText } = resolveInboundSender(
     text,
     channel,
     sessionContext,
   );
   const preview = strippedText.length > 100 ? `${strippedText.slice(0, 100)}...` : strippedText;
   const ctxInfo = sessionContext ? extractGroupContext(sessionContext) : {};
-  log?.info?.(`chat.inject from ${displayName} in ${bcsGroupId} (observe only): ${preview}`, ctxInfo);
+  log?.info?.(`chat.inject from ${fromDisplayName} in ${bcsGroupId} (observe only): ${preview}`, ctxInfo);
 
   // ACK immediately - no response needed for inject
   client.sendResponse(request.id, true, {});
@@ -1367,15 +1376,15 @@ export async function handleChatInject(
       Body: text,
       RawBody: text,
       CommandBody: text,
-      From: `bcs:${displayName}`,
+      From: `bcs:${fromDisplayName}`,
       To: bcsGroupId || `bcs:${account.botId}`,
       SessionKey: route.sessionKey,
       AccountId: account.accountId,
       OriginatingChannel: CHANNEL_ID,
       OriginatingTo: bcsGroupId || `bcs:${account.botId}`,
       ChatType: 'group',
-      SenderName: displayName,
-      SenderId: actorId,
+      SenderName: senderName,
+      SenderId: senderId,
       Provider: CHANNEL_ID,
       Surface: CHANNEL_ID,
       ConversationLabel: bcsGroupId ? `BCS Group ${bcsGroupId}` : 'BCS Onboarding',
