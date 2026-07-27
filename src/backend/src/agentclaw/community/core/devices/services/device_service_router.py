@@ -48,7 +48,6 @@ from agentclaw.community.core.service_bot.repository.bot_publish_repository impo
     BotPublishRepositoryProtocol,
 )
 from agentclaw.community.log import get_logger
-from agentclaw.community.utils import env_utils
 
 
 logger = get_logger()
@@ -900,8 +899,12 @@ class DeviceServiceRouter(DeviceService):
             DeviceNotBoundError: default_tag 指定但无匹配的评测沙箱绑定
         """
         if default_tag:
-            binding_id = self._resolve_binding_id_by_default_tag(
+            from agentclaw.community.core.devices.services.default_tag_resolver import (
+                resolve_binding_id_by_default_tag,
+            )
+            binding_id = resolve_binding_id_by_default_tag(
                 bot_id=bot_id, default_tag=default_tag,
+                bot_query=self._bot_query, repo=self._repo,
             )
         else:
             binding_id = self._instance_service()._resolve_binding_id_by_bot_id(bot_id)
@@ -913,73 +916,6 @@ class DeviceServiceRouter(DeviceService):
             device_uuid=device_uuid,
             ws_conn_mode=ws_conn_mode,
         )
-
-    # ── default_tag 绑定解析 ──
-
-    _DEFAULT_ENV_TAG_KEY = "AGENTCLAW_DEFAULT_TAG"
-
-    def _resolve_binding_id_by_default_tag(
-        self,
-        *,
-        bot_id: str,
-        default_tag: str,
-    ) -> int:
-        """按 default_tag 在绑定表中查找评测沙箱的 binding_id。
-
-        查找路径：
-        1. 通过 BotQueryProtocol 获取 bot 的 owner_id / entity_type
-        2. 通过 DeviceBindingRepository.get_active_bindings_by_entity 查该实体下所有 ACTIVE 绑定
-        3. 按 device_props[AGENTCLAW_DEFAULT_TAG] == default_tag 精确匹配
-        4. 无精确匹配时取第一个含 AGENTCLAW_DEFAULT_TAG 的绑定并打 warning
-
-        Raises:
-            DeviceNotBoundError: bot 不存在或无匹配的评测沙箱绑定
-        """
-        from agentclaw.community.core.devices.services.device_context import DeviceNotBoundError
-
-        bot_info = self._bot_query.get_by_id(bot_id)
-        if not bot_info:
-            raise DeviceNotBoundError(
-                f"Bot {bot_id!r} 不存在，无法解析 default_tag 绑定"
-            )
-
-        owner_id = bot_info.get("owner_id", "")
-        entity_type = bot_info.get("entity_type", "staff")
-        env = env_utils.get_current_env()
-
-        bindings = self._repo.get_active_bindings_by_entity(
-            entity_id=owner_id,
-            entity_type=entity_type,
-            env=env,
-        )
-
-        # 精确匹配 default_tag
-        matched = None
-        fallback = None
-        for b in bindings:
-            props = b.device_props or {}
-            tag_value = props.get(self._DEFAULT_ENV_TAG_KEY)
-            if tag_value == default_tag:
-                matched = b
-                break
-            if tag_value is not None and fallback is None:
-                fallback = b
-
-        result = matched or fallback
-        if result is None:
-            raise DeviceNotBoundError(
-                f"未找到 bot_id={bot_id!r} 的 default_tag={default_tag!r} 评测沙箱绑定"
-            )
-
-        if fallback and not matched:
-            logger.warning(
-                "[DeviceServiceRouter] default_tag=%s 无精确匹配，"
-                "回退到 binding_id=%d (tag=%s)",
-                default_tag, result.id,
-                (result.device_props or {}).get(self._DEFAULT_ENV_TAG_KEY),
-            )
-
-        return result.id
 
     @override
     def get_instances(
