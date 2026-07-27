@@ -44,6 +44,47 @@ async def test_llm_exception_returns_none():
     assert out is None
 
 
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_todo_only_patch_returns_none():
+    """When the LLM's only change is `<!-- TODO: ... -->` placeholders (it was
+    asked to "supplement info" but given no concrete content), the result is not
+    an actionable fix — drop it like a no-op patch rather than persisting TODO
+    noise."""
+    llm = MagicMock()
+    llm.chat = AsyncMock(
+        return_value=(
+            "<!-- FIX_SUMMARY: 待补充画像信息 -->\n"
+            "# SOUL\n\n"
+            "<!-- TODO: 补充当前 Bot 的专属职责与场景 -->\n"
+        )
+    )
+    out = await _planner(llm)._llm_generate_fix(
+        file_type="SOUL.md", src="# SOUL",
+        issues="- [info] D-SOUL-001: 建议补充画像信息",
+        template_instructions="",
+    )
+    assert out is None
+
+
+@pytest.mark.unit
+@pytest.mark.asyncio
+async def test_real_fix_returns_content():
+    """A genuine content change (not just TODO markers) is returned as a patch."""
+    llm = MagicMock()
+    llm.chat = AsyncMock(
+        return_value="<!-- FIX_SUMMARY: 重写人格描述 -->\n# SOUL\n\n我是当前 Bot 的专属人格。"
+    )
+    out = await _planner(llm)._llm_generate_fix(
+        file_type="SOUL.md", src="# SOUL",
+        issues="- [info] D-SOUL-001: 人格过于通用", template_instructions="",
+    )
+    assert out is not None
+    fixed, desc = out
+    assert "专属人格" in fixed
+    assert desc == "重写人格描述"
+
+
 # ── generate_and_save_patches: patch_repo write + scan_record update ──────────
 #
 # These exercise the now-unconditional persistence path (patch_repo /

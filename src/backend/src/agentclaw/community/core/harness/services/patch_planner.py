@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 from agentclaw.community.core.harness.models import (
@@ -40,6 +41,20 @@ def _align_trailing_newline(dst: str, src: str) -> str:
     if not src_has_final and dst_has_final:
         return dst.rstrip("\n")
     return dst
+
+
+_TODO_COMMENT_RE = re.compile(r"<!--\s*TODO:.*?-->", re.DOTALL)
+
+
+def _strip_todo_comments(text: str) -> str:
+    """Remove `<!-- TODO: ... -->` placeholder markers from generated content.
+
+    Used to detect "TODO-only" patches: if removing every TODO marker makes the
+    fixed content identical to the source, the LLM added only advisory
+    placeholders (it was asked to supplement info but given nothing concrete)
+    and there is no real edit to persist.
+    """
+    return _TODO_COMMENT_RE.sub("", text)
 
 
 class PatchPlanner:
@@ -453,6 +468,17 @@ class PatchPlanner:
 
         if fixed_content.strip() == src.strip():
             logger.warning("[PatchPlanner] LLM fixed content same as original, skipping")
+            return None
+
+        # An LLM asked to "supplement info" with no concrete content may satisfy
+        # the diff requirement by only injecting `<!-- TODO: ... -->` placeholders.
+        # That is advisory noise, not an actionable file edit — drop it the same
+        # way as a no-op patch rather than persisting a TODO-only diff.
+        if _strip_todo_comments(fixed_content).strip() == src.strip():
+            logger.warning(
+                "[PatchPlanner] LLM fixed content only adds TODO placeholders for %s, skipping",
+                file_type,
+            )
             return None
 
         return fixed_content, short_description
