@@ -29,6 +29,7 @@ from secbaas.community.api.bot_runtime import (
 )
 from secbaas.community.core.service.bot_run import BaasBotService, BaasBotServiceConfig
 from secbaas.community.core.service.bot_run._async_chat_client import (
+    ChatErrorMessageError,
     ConcurrentSessionError,
 )
 from secbaas.community.core.service.bot_run._async_chat_client_pool import (
@@ -404,11 +405,15 @@ class TestSendMessage:
     async def test_send_message_error_state_marks_failed(
         self, service, wss_resolver, mock_pool
     ):
-        """ChatClient returning error state marks session as FAILED and raises."""
+        """ChatClient raising ChatErrorMessageError (WS error state) marks session FAILED and raises."""
         binding = _make_binding_info(baas_session_id="SESSION-xyz")
 
         mock_client = AsyncMock()
-        mock_client.send_message = AsyncMock(return_value=("error msg", "error"))
+        # Real AsyncChatClient.send_message raises ChatErrorMessageError when
+        # _SessionState.state == "error"; mock that contract here.
+        mock_client.send_message = AsyncMock(
+            side_effect=ChatErrorMessageError("error msg")
+        )
         mock_pool.get.return_value = mock_client
 
         with (
@@ -418,8 +423,9 @@ class TestSendMessage:
                 return_value=_make_conn_info(),
             ),
             patch.object(service, "_mark_session_failed") as mock_failed,
+            patch.object(service, "_mark_session_completed") as mock_completed,
         ):
-            with pytest.raises(BotServiceError, match="error msg"):
+            with pytest.raises(BotServiceError, match="Failed to send message"):
                 await service.send_message(
                     session_id=SESSION_ID,
                     message="hello",
@@ -427,6 +433,7 @@ class TestSendMessage:
                     timeout=30.0,
                 )
             mock_failed.assert_called_once_with("SESSION-xyz", err_msg="error msg")
+            mock_completed.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_send_message_exception_marks_failed(

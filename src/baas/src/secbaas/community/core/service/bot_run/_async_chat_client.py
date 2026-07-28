@@ -101,6 +101,16 @@ class NotConnectedError(Exception):
     """连接未建立或已断开时抛出。"""
 
 
+class ChatErrorMessageError(Exception):
+    """非流式 send_message 等待 chat 完成后，_SessionState.state == "error" 时抛出。
+
+    WS error 事件（含 errorCode=CONNECTION_ERROR 等）会设置 state.state="error"
+    并触发 chat_complete。send_message 解除等待后检测到 error state，通过该异常
+    把错误信号透传给调用方（如 _baas_service），使其标记 bot run 为 FAILED，
+    而非落入 _mark_session_completed。
+    """
+
+
 class AsyncChatClient:
     """WebSocket 聊天客户端封装类（纯异步版本）
 
@@ -393,6 +403,13 @@ class AsyncChatClient:
                 else:
                     # 无超时等待
                     await state.chat_complete.wait()
+
+                # 非流式路径：chat 完成后若 state.state == "error"（含 WS
+                # CONNECTION_ERROR 等错误事件），通过异常把错误透传给调用方，
+                # 使其能把 bot run 标记为 FAILED 而非 COMPLETED。流式路径由
+                # StreamChunk(type="error") 在 send_message_stream 中单独透传。
+                if state.state == "error":
+                    raise ChatErrorMessageError(state.content or "chat error")
 
                 return state.content, state.agent_payloads
 
