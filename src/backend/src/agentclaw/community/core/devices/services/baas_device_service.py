@@ -392,6 +392,15 @@ class BaasDeviceService(DeviceService):
                 "envs": dict(extra_envs) if extra_envs else {},
                 "template_uid": template_uid,
                 "template_uuid": template_uuid,
+                # 评测沙箱标记：将 extra_envs 中的 AGENTCLAW_DEFAULT_TAG 和 bot_id
+                # 提升到 device_props 顶层，便于查询时按 bot 维度精确匹配
+                **{
+                    k: v
+                    for k, v in (extra_envs or {}).items()
+                    if k in ("AGENTCLAW_DEFAULT_TAG",)
+                },
+                # bot_id 写入顶层，确保评测沙箱按 bot 精确定位
+                **({"bot_id": bolt_id} if bolt_id else {}),
             },
         )
 

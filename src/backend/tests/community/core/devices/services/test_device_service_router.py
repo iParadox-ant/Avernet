@@ -1001,8 +1001,11 @@ class TestResolveBindingIdByDefaultTag:
         _, repo, bot_query, _ = _make_router(is_local=False)
         return repo, bot_query
 
-    def _make_tagged_record(self, *, id: int, tag: str, entity_id: str = "u001") -> DeviceBindingRecord:
+    def _make_tagged_record(self, *, id: int, tag: str, entity_id: str = "u001", bot_id: str | None = None) -> DeviceBindingRecord:
         """创建带 AGENTCLAW_DEFAULT_TAG 的 binding record。"""
+        props = {"AGENTCLAW_DEFAULT_TAG": tag, "callback_token": "tok"}
+        if bot_id is not None:
+            props["bot_id"] = bot_id
         return DeviceBindingRecord(
             id=id,
             entity_id=entity_id,
@@ -1010,7 +1013,7 @@ class TestResolveBindingIdByDefaultTag:
             device_id=f"device-{id}",
             device_provider=ARCA_DEVICE_PROVIDER,
             env="dev",
-            device_props={"AGENTCLAW_DEFAULT_TAG": tag, "callback_token": "tok"},
+            device_props=props,
             status=DeviceBindingStatus.ACTIVE.value,
             apply_reason=None,
             applied_by=entity_id,
@@ -1090,6 +1093,70 @@ class TestResolveBindingIdByDefaultTag:
 
         with pytest.raises(Exception, match="未找到"):
             self._call(bot_id="bot001", default_tag="default", bot_query=bot_query, repo=repo)
+
+    def test_bot_id_filter_excludes_other_bot(self):
+        """有 bot_id 字段时，仅匹配目标 bot 的绑定。"""
+        repo, bot_query = self._make_deps()
+        bot_query.get_by_id.return_value = {
+            "owner_id": "u001", "entity_type": "staff",
+        }
+        b1 = self._make_tagged_record(id=10, tag="default", bot_id="bot-A")
+        b2 = self._make_tagged_record(id=20, tag="default", bot_id="bot-B")
+        repo.get_active_bindings_by_entity.return_value = [b1, b2]
+
+        result = self._call(bot_id="bot-A", default_tag="default", bot_query=bot_query, repo=repo)
+        assert result == 10
+
+    def test_bot_id_filter_matches_correct_bot(self):
+        """有 bot_id 字段时，查询 bot-B 返回 bot-B 的绑定。"""
+        repo, bot_query = self._make_deps()
+        bot_query.get_by_id.return_value = {
+            "owner_id": "u001", "entity_type": "staff",
+        }
+        b1 = self._make_tagged_record(id=10, tag="default", bot_id="bot-A")
+        b2 = self._make_tagged_record(id=20, tag="default", bot_id="bot-B")
+        repo.get_active_bindings_by_entity.return_value = [b1, b2]
+
+        result = self._call(bot_id="bot-B", default_tag="default", bot_query=bot_query, repo=repo)
+        assert result == 20
+
+    def test_bot_id_filter_no_match_raises(self):
+        """有 bot_id 字段但无匹配 bot 时抛异常。"""
+        repo, bot_query = self._make_deps()
+        bot_query.get_by_id.return_value = {
+            "owner_id": "u001", "entity_type": "staff",
+        }
+        b1 = self._make_tagged_record(id=10, tag="default", bot_id="bot-A")
+        repo.get_active_bindings_by_entity.return_value = [b1]
+
+        with pytest.raises(Exception, match="未找到"):
+            self._call(bot_id="bot-B", default_tag="default", bot_query=bot_query, repo=repo)
+
+    def test_backward_compat_no_bot_id_field(self):
+        """存量数据无 bot_id 字段时，保持向后兼容（不过滤 bot）。"""
+        repo, bot_query = self._make_deps()
+        bot_query.get_by_id.return_value = {
+            "owner_id": "u001", "entity_type": "staff",
+        }
+        b1 = self._make_tagged_record(id=30, tag="default")
+        assert "bot_id" not in (b1.device_props or {})
+        repo.get_active_bindings_by_entity.return_value = [b1]
+
+        result = self._call(bot_id="any-bot", default_tag="default", bot_query=bot_query, repo=repo)
+        assert result == 30
+
+    def test_mixed_bot_id_fields_prefers_tagged(self):
+        """混合场景：有 bot_id 字段的绑定和没有的绑定共存时，按 bot_id 精确匹配的优先。"""
+        repo, bot_query = self._make_deps()
+        bot_query.get_by_id.return_value = {
+            "owner_id": "u001", "entity_type": "staff",
+        }
+        b_legacy = self._make_tagged_record(id=5, tag="default")
+        b_tagged = self._make_tagged_record(id=10, tag="default", bot_id="bot-A")
+        repo.get_active_bindings_by_entity.return_value = [b_legacy, b_tagged]
+
+        result = self._call(bot_id="bot-A", default_tag="default", bot_query=bot_query, repo=repo)
+        assert result == 10
 
 
 class TestGetDeviceConnectionByBotWithDefaultTag:
